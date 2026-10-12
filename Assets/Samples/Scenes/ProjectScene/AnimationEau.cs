@@ -2,25 +2,22 @@ using UnityEngine;
 
 public class AnimationEau : MonoBehaviour
 {
-    public float vitesseX = 0.02f;
-    public float vitesseY = 0.03f;
-    private Renderer rendu;
+    public float vitesseX = 0.05f;
+    public float vitesseY = 0.05f;
+    private Renderer rend;
 
     void Start()
     {
-        rendu = GetComponent<Renderer>();
+        rend = GetComponent<Renderer>();
     }
 
     void Update()
     {
-        // On calcule le décalage progressif dans le temps
-        float decalageX = Time.time * vitesseX;
-        float decalageY = Time.time * vitesseY;
-
-        // On applique ce décalage à la texture de vagues (Normal Map)
-        if (rendu != null && rendu.material != null)
+        if (rend != null)
         {
-            rendu.material.SetTextureOffset("_BumpMap", new Vector2(decalageX, decalageY));
+            Vector2 offset = new Vector2(Time.time * vitesseX, Time.time * vitesseY);
+            rend.material.SetTextureOffset("_BaseMap", offset);
+            rend.material.SetTextureOffset("_BumpMap", offset);
         }
     }
 }
