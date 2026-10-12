@@ -1,0 +1,15 @@
+fileFormatVersion: 2
+guid: 0dbb88c50070c3f4f885744db5291cc0
+NativeFormatImporter:
+  externalObjects: {}
+  mainObjectFileID: 11400000
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 213198
+  packageName: Unity HDRP Terrain | Terrain Sample Project
+  packageVersion: 1.1.0
+  assetPath: Assets/TextMesh Pro/Fonts/InterRegular.asset
+  uploadId: 993772

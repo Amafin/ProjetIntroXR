@@ -1,0 +1,14 @@
+fileFormatVersion: 2
+guid: ec16d975ef5b1c34d914fe53fab5e901
+TextScriptImporter:
+  externalObjects: {}
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 213198
+  packageName: Unity HDRP Terrain | Terrain Sample Project
+  packageVersion: 1.1.0
+  assetPath: Assets/TextMesh Pro/Fonts/License.txt
+  uploadId: 993772
