@@ -59,6 +59,24 @@ public class Fish : MonoBehaviour
     [Tooltip("Désactiver le collider à la mort ? (sinon il reste harponnable)")]
     public bool keepColliderWhenDead = true;
 
+    [Header("Obstacles (terrain, rochers...)")]
+    [Tooltip("Layers considérés comme obstacles. Exclure le layer de l'eau si elle a un collider !")]
+    public LayerMask obstacleMask = ~0;
+    [Tooltip("Rayon de détection (un peu plus grand que le poisson)")]
+    public float obstacleRadius = 0.5f;
+    [Tooltip("Distance de détection devant le poisson (augmente avec la vitesse)")]
+    public float obstacleCheckDistance = 3f;
+    [Tooltip("Vitesse de rotation minimale quand il évite un obstacle")]
+    public float avoidTurnSpeed = 5f;
+    [Tooltip("Vérifie toutes les X secondes si le poisson est bloqué")]
+    public float stuckCheckInterval = 1.5f;
+    [Tooltip("Distance minimale parcourue entre deux vérifications, sinon il est considéré bloqué")]
+    public float stuckMinDistance = 0.3f;
+    [Tooltip("Durée de la manoeuvre de dégagement quand il est bloqué")]
+    public float escapeDuration = 1.5f;
+    [Tooltip("Hauteur minimale gardée au-dessus du sol (le poisson ne peut pas descendre plus bas)")]
+    public float groundMargin = 0.4f;
+
     [Header("Eau (optionnel)")]
     [Tooltip("Si > 0, le poisson ne dépassera jamais cette hauteur Y (surface de l'eau)")]
     public float waterSurfaceY = 0f;
@@ -76,6 +94,15 @@ public class Fish : MonoBehaviour
     private float bobTimer;
     private Quaternion deadRotation;
 
+    // Obstacles / déblocage
+    private readonly RaycastHit[] hitBuffer = new RaycastHit[8];
+    private float stuckTimer;
+    private Vector3 lastCheckPosition;
+    private float escapeTimer;
+    private Vector3 escapeDir;
+    private Vector3 lastHitNormal = Vector3.up;
+    private float lastHitTime = -10f;
+
     public bool IsDead => state == State.Dead;
 
     void Awake()
@@ -85,6 +112,7 @@ public class Fish : MonoBehaviour
         rb.linearDamping = 1.5f;
         rb.angularDamping = 3f;
         rb.interpolation = RigidbodyInterpolation.Interpolate;
+        rb.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic; // pas de traversée à haute vitesse
         rb.constraints = RigidbodyConstraints.FreezeRotation;
     }
 
@@ -92,11 +120,20 @@ public class Fish : MonoBehaviour
     {
         spawnPoint = transform.position;
 
+        // En VR, on utilise la tête du joueur (Main Camera de l'XR Origin) : la racine de
+        // l'XR Origin reste au sol et ne suit pas toujours les déplacements réels du casque.
         if (player == null)
         {
-            GameObject p = GameObject.FindGameObjectWithTag("Player");
-            if (p != null) player = p.transform;
-            else Debug.LogWarning("Fish: aucun joueur trouvé (tag 'Player'). Le poisson n'aura jamais peur.", this);
+            if (Camera.main != null)
+            {
+                player = Camera.main.transform;
+            }
+            else
+            {
+                GameObject p = GameObject.FindGameObjectWithTag("Player");
+                if (p != null) player = p.transform;
+                else Debug.LogWarning("Fish: aucun joueur trouvé (ni Main Camera, ni tag 'Player'). Le poisson n'aura jamais peur.", this);
+            }
         }
 
         PickNewTarget();
@@ -104,12 +141,18 @@ public class Fish : MonoBehaviour
 
     void FixedUpdate()
     {
+        if (state != State.Dead)
+        {
+            CheckStuck();
+            KeepAboveGround();
+        }
+
         switch (state)
         {
             case State.Wandering: UpdateWandering(); break;
-            case State.Fleeing:   UpdateFleeing();   break;
+            case State.Fleeing: UpdateFleeing(); break;
             case State.Returning: UpdateReturning(); break;
-            case State.Dead:      UpdateDead();      break;
+            case State.Dead: UpdateDead(); break;
         }
     }
 
@@ -141,18 +184,22 @@ public class Fish : MonoBehaviour
 
     void PickNewTarget()
     {
-        // Point aléatoire dans la sphère de la maison
-        for (int i = 0; i < 10; i++)
+        // Point aléatoire dans la sphère de la maison, en évitant les destinations
+        // situées dans le terrain ou derrière un obstacle
+        for (int i = 0; i < 15; i++)
         {
             Vector3 candidate = spawnPoint + Random.insideUnitSphere * homeRadius;
             candidate = ClampToWater(candidate);
-            if (Vector3.Distance(candidate, transform.position) >= minWanderDistance)
-            {
-                targetPoint = candidate;
-                return;
-            }
+
+            if (Vector3.Distance(candidate, transform.position) < minWanderDistance) continue;
+            if (!IsPathClear(candidate)) continue;
+
+            targetPoint = candidate;
+            return;
         }
-        targetPoint = ClampToWater(spawnPoint + Random.insideUnitSphere * homeRadius);
+
+        // Aucun point valide trouvé : il retourne à son point de spawn (zone libre)
+        targetPoint = spawnPoint;
     }
 
     // ---------------------------------------------------------------- Peur
@@ -270,9 +317,32 @@ public class Fish : MonoBehaviour
 
     void MoveToward(Vector3 target, float speed, float turn)
     {
+        // Manoeuvre de dégagement : on ignore la cible et on s'éloigne de l'obstacle
+        if (escapeTimer > 0f)
+        {
+            escapeTimer -= Time.fixedDeltaTime;
+            target = transform.position + escapeDir * 5f;
+        }
+
         Vector3 dir = target - transform.position;
         if (dir.sqrMagnitude < 0.0001f) return;
         dir.Normalize();
+
+        // Évitement : si un obstacle est devant, on longe sa surface en s'en écartant
+        float checkDist = Mathf.Max(obstacleCheckDistance, speed * 0.6f);
+        if (ObstacleAhead(transform.position, transform.forward, checkDist, out RaycastHit hit))
+        {
+            Vector3 n = hit.normal;
+            float proximity = 1f - Mathf.Clamp01(hit.distance / checkDist);
+
+            Vector3 slide = Vector3.ProjectOnPlane(dir, n);
+            if (slide.sqrMagnitude < 0.05f) // face à l'obstacle : on choisit un côté
+                slide = Vector3.ProjectOnPlane(transform.right, n);
+
+            dir = (slide.normalized + n * (0.5f + proximity)).normalized;
+            turn = Mathf.Max(turn, avoidTurnSpeed);
+            speed *= Mathf.Lerp(1f, 0.4f, proximity); // ralentit près de l'obstacle
+        }
 
         Quaternion targetRot = Quaternion.LookRotation(dir, Vector3.up);
         rb.MoveRotation(Quaternion.Slerp(rb.rotation, targetRot, turn * Time.fixedDeltaTime));
@@ -299,6 +369,127 @@ public class Fish : MonoBehaviour
             p.y = Mathf.Min(p.y, waterSurfaceY - surfaceMargin);
 
         return p;
+    }
+
+    // ---------------------------------------------------------------- Obstacles
+
+    /// <summary>Sphere-cast qui ignore le poisson lui-même et les autres poissons.</summary>
+    bool ObstacleAhead(Vector3 from, Vector3 dir, float distance, out RaycastHit best)
+    {
+        best = default;
+        int count = Physics.SphereCastNonAlloc(from, obstacleRadius, dir, hitBuffer,
+                                               distance, obstacleMask,
+                                               QueryTriggerInteraction.Ignore);
+
+        float bestDist = float.MaxValue;
+        bool found = false;
+        for (int i = 0; i < count; i++)
+        {
+            RaycastHit h = hitBuffer[i];
+            if (h.collider.transform.IsChildOf(transform)) continue;
+            if (h.collider.GetComponentInParent<Fish>() != null) continue;
+
+            if (h.distance < bestDist)
+            {
+                bestDist = h.distance;
+                best = h;
+                found = true;
+            }
+        }
+
+        // La sphère démarre déjà dans l'obstacle : pas de normale fournie
+        if (found && best.normal == Vector3.zero) best.normal = -dir;
+        return found;
+    }
+
+    bool IsPathClear(Vector3 to)
+    {
+        if (Physics.CheckSphere(to, obstacleRadius, obstacleMask, QueryTriggerInteraction.Ignore))
+            return false;
+
+        Vector3 d = to - transform.position;
+        return !ObstacleAhead(transform.position, d.normalized, d.magnitude, out _);
+    }
+
+    void CheckStuck()
+    {
+        stuckTimer += Time.fixedDeltaTime;
+        if (stuckTimer < stuckCheckInterval) return;
+        stuckTimer = 0f;
+
+        bool shouldBeMoving = !(state == State.Wandering && pauseTimer > 0f);
+        float moved = Vector3.Distance(transform.position, lastCheckPosition);
+        lastCheckPosition = transform.position;
+
+        if (shouldBeMoving && escapeTimer <= 0f && moved < stuckMinDistance)
+            Unstick();
+    }
+
+    void Unstick()
+    {
+        Vector3 away = (Time.time - lastHitTime < 2f) ? lastHitNormal : -transform.forward;
+        escapeDir = (away + Random.insideUnitSphere * 0.5f).normalized;
+        escapeTimer = escapeDuration;
+
+        if (state == State.Wandering) PickNewTarget();
+    }
+
+    /// <summary>
+    /// Filet de sécurité : si le poisson passe sous la surface du sol (collision ratée,
+    /// terrain sans collider...), il est remonté au-dessus du sol.
+    /// </summary>
+    void KeepAboveGround()
+    {
+        const float checkUp = 1f; // le rayon part 1 m au-dessus du poisson
+        Vector3 p = rb.position;
+
+        int count = Physics.RaycastNonAlloc(p + Vector3.up * checkUp, Vector3.down, hitBuffer,
+                                            checkUp + groundMargin, obstacleMask,
+                                            QueryTriggerInteraction.Ignore);
+
+        float bestDist = float.MaxValue;
+        float groundY = 0f;
+        bool found = false;
+        for (int i = 0; i < count; i++)
+        {
+            RaycastHit h = hitBuffer[i];
+            if (h.collider.transform.IsChildOf(transform)) continue;
+            if (h.collider.GetComponentInParent<Fish>() != null) continue;
+
+            if (h.distance < bestDist)
+            {
+                bestDist = h.distance;
+                groundY = h.point.y;
+                found = true;
+            }
+        }
+
+        if (!found) return;
+
+        float minY = groundY + groundMargin;
+        if (p.y < minY)
+        {
+            p.y = minY;
+            rb.position = p;
+
+            Vector3 v = rb.linearVelocity;
+            if (v.y < 0f) { v.y = 0f; rb.linearVelocity = v; }
+        }
+    }
+
+    void OnCollisionEnter(Collision c) { HandleCollision(c, true); }
+    void OnCollisionStay(Collision c) { HandleCollision(c, false); }
+
+    void HandleCollision(Collision c, bool enter)
+    {
+        if (state == State.Dead) return;
+        if (c.collider.GetComponentInParent<Fish>() != null) return;
+
+        lastHitNormal = c.GetContact(0).normal;
+        lastHitTime = Time.time;
+
+        // Cogné pendant la balade : on change de destination tout de suite
+        if (enter && state == State.Wandering) PickNewTarget();
     }
 
     // ---------------------------------------------------------------- Debug
