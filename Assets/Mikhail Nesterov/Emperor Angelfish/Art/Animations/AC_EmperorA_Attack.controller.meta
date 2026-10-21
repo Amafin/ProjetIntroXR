@@ -1,0 +1,15 @@
+fileFormatVersion: 2
+guid: 16fec966f6049d049a6cc95dfe6712e8
+NativeFormatImporter:
+  externalObjects: {}
+  mainObjectFileID: 9100000
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 263329
+  packageName: Emperor Angelfish
+  packageVersion: 2.0.0
+  assetPath: Assets/Mikhail Nesterov/Emperor Angelfish/Art/Animations/AC_EmperorA_Attack.controller
+  uploadId: 863562

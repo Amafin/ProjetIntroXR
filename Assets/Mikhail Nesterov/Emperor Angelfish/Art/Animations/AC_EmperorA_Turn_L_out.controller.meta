@@ -1,0 +1,15 @@
+fileFormatVersion: 2
+guid: 9db4346fa2b29c540b004b234d0c7461
+NativeFormatImporter:
+  externalObjects: {}
+  mainObjectFileID: 9100000
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 263329
+  packageName: Emperor Angelfish
+  packageVersion: 2.0.0
+  assetPath: Assets/Mikhail Nesterov/Emperor Angelfish/Art/Animations/AC_EmperorA_Turn_L_out.controller
+  uploadId: 863562
