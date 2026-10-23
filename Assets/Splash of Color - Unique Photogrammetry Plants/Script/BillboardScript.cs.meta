@@ -1,0 +1,18 @@
+fileFormatVersion: 2
+guid: f771f729641d6024f91e0ec722b9f129
+MonoImporter:
+  externalObjects: {}
+  serializedVersion: 2
+  defaultReferences: []
+  executionOrder: 0
+  icon: {instanceID: 0}
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 211137
+  packageName: Splash of Color - Unique Photogrammetry Plants
+  packageVersion: 1.0
+  assetPath: Assets/Splash of Color - Unique Photogrammetry Plants/Script/BillboardScript.cs
+  uploadId: 482880
