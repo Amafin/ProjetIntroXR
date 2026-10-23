@@ -39,6 +39,14 @@ public class FishSpawner : MonoBehaviour
     [Tooltip("Délai entre deux apparitions (secondes)")]
     public float spawnInterval = 2f;
 
+    [Header("Taille aléatoire")]
+    [Tooltip("Multiplicateur de taille minimum (1 = taille du prefab)")]
+    public float minScale = 0.7f;
+    [Tooltip("Multiplicateur de taille maximum")]
+    public float maxScale = 1.6f;
+    [Tooltip("1 = tailles réparties uniformément. Plus haut = beaucoup de petits poissons et de rares gros.")]
+    public float bigFishRarity = 1.5f;
+
     [Header("Règles d'apparition")]
     [Tooltip("Pas de spawn plus près que ça du joueur (évite l'effet pop-in)")]
     public float minDistanceFromPlayer = 15f;
@@ -63,10 +71,18 @@ public class FishSpawner : MonoBehaviour
             return;
         }
 
+        // En VR, on utilise la tête du joueur (Main Camera de l'XR Origin)
         if (player == null)
         {
-            GameObject p = GameObject.FindGameObjectWithTag("Player");
-            if (p != null) player = p.transform;
+            if (Camera.main != null)
+            {
+                player = Camera.main.transform;
+            }
+            else
+            {
+                GameObject p = GameObject.FindGameObjectWithTag("Player");
+                if (p != null) player = p.transform;
+            }
         }
 
         for (int i = 0; i < initialCount && AliveCount() < maxFish; i++)
@@ -95,6 +111,15 @@ public class FishSpawner : MonoBehaviour
 
         Quaternion rot = Quaternion.Euler(0f, Random.Range(0f, 360f), 0f);
         Fish fish = Instantiate(fishPrefab, pos, rot, transform);
+
+        // Taille aléatoire (les gros sont plus rares si bigFishRarity > 1)
+        float t = Mathf.Pow(Random.value, Mathf.Max(0.01f, bigFishRarity));
+        float scale = Mathf.Lerp(minScale, maxScale, t);
+        fish.transform.localScale = fishPrefab.transform.localScale * scale;
+
+        // Les tailles de détection suivent la taille du poisson
+        fish.obstacleRadius *= scale;
+        fish.groundMargin *= scale;
 
         // Réglages communs (appliqués avant le Start() du poisson)
         fish.player = player;
