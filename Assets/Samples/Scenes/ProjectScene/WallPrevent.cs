@@ -28,6 +28,10 @@ public class WallPrevent : MonoBehaviour
     {
         if (_headTransform == null || _characterController == null) return;
 
+        // Character Controller désactivé (la nage déplace l'XR Origin elle-même) :
+        // Move() ne ferait rien d'autre qu'écrire un avertissement à chaque image.
+        if (!_characterController.enabled) return;
+
         // 1. Recentre la capsule sur la caméra pour bloquer les murs
         _characterController.center = new Vector3(
             _headTransform.localPosition.x,

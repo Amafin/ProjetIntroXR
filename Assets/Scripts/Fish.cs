@@ -1,10 +1,19 @@
 using UnityEngine;
+using UnityEngine.XR.Interaction.Toolkit;
+using UnityEngine.XR.Interaction.Toolkit.Filtering;
+using UnityEngine.XR.Interaction.Toolkit.Inputs.Haptics;
+using UnityEngine.XR.Interaction.Toolkit.Interactables;
+using UnityEngine.XR.Interaction.Toolkit.Interactors;
 
 /// <summary>
 /// Poisson simple pour chasse au harpon.
 /// - Reste dans une zone (maison) autour de son point de spawn (rayon max 20 m)
 /// - Prend peur si le joueur est trop proche, fuit, puis revient doucement
 /// - Quand il est tué : se met sur le côté et flotte/stagne
+/// - Une fois mort, il peut être saisi à la main (XR Grab Interactable ajouté automatiquement).
+///   Le saisir le retire du harpon ; l'amener à la sacoche sur la hanche (voir FishBag) le range : +1 poisson.
+/// - Si le prefab n'a pas de collider, une boîte englobante est créée au lancement
+///   (sans collider, le harpon ne peut pas le toucher).
 ///
 /// Installation :
 ///  1. Ajouter ce script sur le prefab du poisson (avec un Rigidbody + Collider).
@@ -36,6 +45,9 @@ public class Fish : MonoBehaviour
     [Header("Peur")]
     [Tooltip("Distance à laquelle le joueur fait peur au poisson")]
     public float fearDistance = 6f;
+    [Tooltip("Vitesse de nage du joueur (m/s) en dessous de laquelle le poisson ne prend PAS peur : " +
+             "en approchant lentement, on peut venir tout près. 0 = il fuit toujours.")]
+    public float calmApproachSpeed = 0.9f;
     public float fleeSpeed = 6f;
     public float fleeTurnSpeed = 6f;
     [Tooltip("Durée minimale de la fuite (secondes)")]
@@ -103,7 +115,53 @@ public class Fish : MonoBehaviour
     private Vector3 lastHitNormal = Vector3.up;
     private float lastHitTime = -10f;
 
+    // Collider / saisie / harpon
+    private XRGrabInteractable grab;
+    private Harpoon impaledBy;
+    private bool carried;      // porté par le harpon tenu en main
+    private bool needsRebase;  // vient d'être lâché : repart de sa position actuelle
+    private bool collected;
+
+    // Tous les poissons présents dans la scène (pour la visée du scan, sans rechercher à chaque image)
+    private static readonly System.Collections.Generic.List<Fish> all = new System.Collections.Generic.List<Fish>();
+    public static System.Collections.Generic.IReadOnlyList<Fish> All => all;
+
+    [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]
+    static void ResetStatics()
+    {
+        all.Clear();
+    }
+
+    void OnEnable()
+    {
+        if (!all.Contains(this)) all.Add(this);
+    }
+
+    void OnDisable()
+    {
+        all.Remove(this);
+    }
+
+    private Collider bodyCollider;
+
+    /// <summary>Volume du poisson dans le monde (son collider).</summary>
+    public Bounds WorldBounds
+    {
+        get
+        {
+            if (bodyCollider == null) bodyCollider = GetComponentInChildren<Collider>();
+            return bodyCollider != null ? bodyCollider.bounds : new Bounds(transform.position, Vector3.one);
+        }
+    }
+
+    /// <summary>Espèce du poisson (nom, statut pêchable / protégé, teinte).</summary>
+    public FishSpecies Species { get; private set; } = FishSpecies.Default;
+
     public bool IsDead => state == State.Dead;
+    /// <summary>Tenu dans une main.</summary>
+    public bool IsHeld => grab != null && grab.isSelected;
+    /// <summary>Tenu en main ou embroché sur le harpon : le spawner ne doit pas le supprimer.</summary>
+    public bool IsBusy => IsHeld || impaledBy != null;
 
     void Awake()
     {
@@ -114,6 +172,69 @@ public class Fish : MonoBehaviour
         rb.interpolation = RigidbodyInterpolation.Interpolate;
         rb.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic; // pas de traversée à haute vitesse
         rb.constraints = RigidbodyConstraints.FreezeRotation;
+
+        EnsureCollider();
+    }
+
+    /// <summary>
+    /// Le prefab du poisson n'a aucun collider : sans ça, ni le harpon ni les mains ne peuvent
+    /// le toucher. On crée une boîte à partir du volume du modèle.
+    /// </summary>
+    void EnsureCollider()
+    {
+        foreach (Collider c in GetComponentsInChildren<Collider>())
+            if (!c.isTrigger) return;
+
+        Bounds local = new Bounds(Vector3.zero, new Vector3(0.1f, 0.3f, 0.4f));
+        bool has = false;
+
+        foreach (Renderer r in GetComponentsInChildren<Renderer>())
+        {
+            Bounds b = r.localBounds;
+            Transform space = r.transform;
+            if (r is SkinnedMeshRenderer smr && smr.rootBone != null)
+                space = smr.rootBone;
+
+            for (int i = 0; i < 8; i++)
+            {
+                Vector3 corner = b.center + Vector3.Scale(b.extents,
+                    new Vector3((i & 1) == 0 ? -1f : 1f, (i & 2) == 0 ? -1f : 1f, (i & 4) == 0 ? -1f : 1f));
+                Vector3 p = transform.InverseTransformPoint(space.TransformPoint(corner));
+                if (!has) { local = new Bounds(p, Vector3.zero); has = true; }
+                else local.Encapsulate(p);
+            }
+        }
+
+        BoxCollider box = gameObject.AddComponent<BoxCollider>();
+        box.center = local.center;
+
+        // Un peu plus petit que le volume du modèle, qui inclut le bout des nageoires.
+        // L'axe le plus fin (l'épaisseur) est réduit bien davantage : ce volume est élargi par
+        // les nageoires pectorales, alors que le corps d'un poisson est plat.
+        Vector3 size = local.size * 0.8f;
+        if (size.x <= size.y && size.x <= size.z) size.x *= 0.45f;
+        else if (size.y <= size.x && size.y <= size.z) size.y *= 0.45f;
+        else size.z *= 0.45f;
+
+        // ...mais jamais trop fin : il doit rester touchable.
+        Vector3 scale = transform.lossyScale;
+        size.x = Mathf.Max(size.x, 0.12f / Mathf.Max(0.0001f, Mathf.Abs(scale.x)));
+        size.y = Mathf.Max(size.y, 0.12f / Mathf.Max(0.0001f, Mathf.Abs(scale.y)));
+        size.z = Mathf.Max(size.z, 0.12f / Mathf.Max(0.0001f, Mathf.Abs(scale.z)));
+        box.size = size;
+    }
+
+    void Update()
+    {
+        // Poisson mort tenu en main : rangé dès que la main arrive sur la sacoche (à la hanche)
+        if (state != State.Dead || collected || !IsHeld) return;
+
+        IXRSelectInteractor hand = grab.interactorsSelecting[0];
+        Vector3 handPos = hand.GetAttachTransform(grab).position;
+
+        FishBag bag = FishBag.Instance;
+        if (bag != null && bag.IsInBagZone(handPos))
+            Collect(bag, hand);
     }
 
     void Start()
@@ -207,7 +328,29 @@ public class Fish : MonoBehaviour
     bool PlayerTooClose()
     {
         if (player == null) return false;
+        if (PlayerIsCalm()) return false; // approche lente : le poisson reste tranquille
         return Vector3.Distance(transform.position, player.position) < fearDistance;
+    }
+
+    /// <summary>Le joueur nage assez lentement pour ne pas effrayer le poisson.</summary>
+    bool PlayerIsCalm()
+    {
+        return calmApproachSpeed > 0f && SwimLocomotion.PlayerSpeed < calmApproachSpeed;
+    }
+
+    /// <summary>Donne son espèce au poisson et applique sa teinte au modèle.</summary>
+    public void SetSpecies(FishSpecies species)
+    {
+        Species = species ?? FishSpecies.Default;
+
+        var block = new MaterialPropertyBlock();
+        foreach (Renderer r in GetComponentsInChildren<Renderer>())
+        {
+            r.GetPropertyBlock(block);
+            block.SetColor("_BaseColor", Species.tint);
+            block.SetColor("_Color", Species.tint);
+            r.SetPropertyBlock(block);
+        }
     }
 
     void StartFleeing()
@@ -236,7 +379,8 @@ public class Fish : MonoBehaviour
         Vector3 fleeTarget = ClampToWater(transform.position + fleeDir * 10f);
         MoveToward(fleeTarget, fleeSpeed, fleeTurnSpeed);
 
-        bool safe = player == null ||
+        // En sécurité s'il est assez loin, ou si le joueur s'est calmé
+        bool safe = player == null || PlayerIsCalm() ||
                     Vector3.Distance(transform.position, player.position) > safeDistance;
 
         if (fleeTimer <= 0f && safe)
@@ -275,6 +419,8 @@ public class Fish : MonoBehaviour
         if (state == State.Dead) return;
 
         state = State.Dead;
+        // Prévenu avant tout le reste : c'est ici que tuer une espèce protégée est compté
+        if (DiveGame.Instance != null) DiveGame.Instance.NotifyFishKilled(this);
         deathBaseY = transform.position.y;
         bobTimer = Random.value * 10f;
 
@@ -287,15 +433,95 @@ public class Fish : MonoBehaviour
         rb.angularVelocity = Vector3.zero;
         rb.isKinematic = true; // on pilote le mouvement à la main
 
-        if (!keepColliderWhenDead)
+        // Fige l'animation de nage
+        Animator anim = GetComponent<Animator>();
+        if (anim != null) anim.speed = 0f;
+
+        // Le collider est toujours conservé : il sert à saisir le poisson mort
+        MakeGrabbable();
+    }
+
+    // ---------------------------------------------------------------- Saisie / harpon / sac
+
+    void MakeGrabbable()
+    {
+        if (grab != null) return;
+
+        grab = GetComponent<XRGrabInteractable>();
+        if (grab == null) grab = gameObject.AddComponent<XRGrabInteractable>();
+
+        grab.movementType = XRBaseInteractable.MovementType.Instantaneous;
+        grab.throwOnDetach = false;      // le corps est kinématique : pas de lancer
+        grab.useDynamicAttach = true;    // saisi là où la main le touche
+        // Pendant le changement de bonbonne, on ne peut rien saisir de nouveau
+        grab.selectFilters.Add(new XRSelectFilterDelegate((interactor, interactable) =>
+            !PlayerLock.Active || interactable.interactorsSelecting.Contains(interactor)));
+        grab.selectEntered.AddListener(OnGrabbed);
+    }
+
+    void OnGrabbed(SelectEnterEventArgs args)
+    {
+        // Prendre le poisson en main le retire du harpon
+        if (impaledBy != null)
         {
-            foreach (Collider c in GetComponentsInChildren<Collider>())
-                c.enabled = false;
+            Harpoon h = impaledBy;
+            impaledBy = null;
+            carried = false;
+            h.ReleaseFish(this);
         }
+        Pulse(args.interactorObject, 0.3f, 0.08f);
+    }
+
+    /// <summary>Appelé par le harpon quand il se plante dans ce poisson (null = il s'en retire).</summary>
+    public void SetImpaledBy(Harpoon harpoon)
+    {
+        impaledBy = harpoon;
+        if (harpoon == null) SetCarried(false);
+    }
+
+    /// <summary>Appelé par le harpon : vrai tant que le harpon tenu en main transporte le poisson.</summary>
+    public void SetCarried(bool value)
+    {
+        if (carried && !value) needsRebase = true;
+        carried = value;
+    }
+
+    void Collect(FishBag bag, IXRSelectInteractor hand)
+    {
+        collected = true;
+        Pulse(hand, 0.8f, 0.2f);
+
+        if (grab.interactionManager != null)
+            grab.interactionManager.CancelInteractableSelection((IXRSelectInteractable)grab);
+
+        bag.Add(this);
+        Destroy(gameObject);
+    }
+
+    static void Pulse(IXRInteractor interactor, float amplitude, float duration)
+    {
+        if (interactor == null || interactor.transform == null) return;
+        HapticImpulsePlayer haptics = interactor.transform.GetComponentInParent<HapticImpulsePlayer>();
+        if (haptics != null) haptics.SendHapticImpulse(amplitude, duration);
     }
 
     void UpdateDead()
     {
+        // Tenu en main ou transporté par le harpon : quelqu'un d'autre le déplace
+        if (carried || IsHeld)
+        {
+            needsRebase = true;
+            return;
+        }
+
+        // Vient d'être lâché : il flotte là où il est, dans l'orientation où on l'a laissé
+        if (needsRebase)
+        {
+            needsRebase = false;
+            deathBaseY = transform.position.y;
+            deadRotation = transform.rotation;
+        }
+
         // Roulis progressif sur le côté
         transform.rotation = Quaternion.Slerp(
             transform.rotation, deadRotation, deathRollSpeed * Time.fixedDeltaTime);
