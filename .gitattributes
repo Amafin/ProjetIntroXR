@@ -169,3 +169,7 @@ Packages/packages-lock.json linguist-generated
 
 # Exceptions for .asset files such as lightning pre-baking
 LightingData.asset     binary
+
+# Donnees de terrain : fichier BINAIRE. Sans cette ligne, git lui applique la conversion des fins de
+# ligne des .asset texte et retire des octets a chaque commit, ce qui rend le terrain illisible.
+Assets/New[[:space:]]Terrain.asset binary
