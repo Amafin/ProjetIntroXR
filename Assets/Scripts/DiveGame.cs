@@ -88,7 +88,9 @@ public class DiveGame : MonoBehaviour
 
     [Header("Bonbonne d'air")]
     [Tooltip("Durée d'une bonbonne quand on ne bouge pas (secondes)")]
-    public float tankDuration = 90f;
+    public float tankDuration = 180f;
+    [Tooltip("Temps de survie une fois la bonbonne vide (secondes). Passé ce délai, la partie est perdue.")]
+    public float suffocationTime = 5f;
     [Tooltip("Surconsommation à pleine vitesse de nage : 2 = l'air part 3 fois plus vite à vitesse max")]
     public float speedDrainFactor = 2f;
     [Tooltip("Durée du changement de bonbonne, pendant laquelle le joueur est figé (secondes)")]
@@ -170,6 +172,10 @@ public class DiveGame : MonoBehaviour
     public float WarningTimeLeft { get; private set; }
     /// <summary>La partie est perdue (trop d'espèces protégées tuées).</summary>
     public bool GameOver { get; private set; }
+    /// <summary>Phrase expliquant pourquoi la partie est perdue.</summary>
+    public string GameOverReason { get; private set; } = "";
+    /// <summary>Asphyxie : 0 tant qu'il reste de l'air, puis monte jusqu'à 1 (mort) une fois la bonbonne vide.</summary>
+    public float Suffocation01 { get; private set; }
     /// <summary>Vrai quand on peut appuyer pour recommencer.</summary>
     public bool CanRestart => GameOver && gameOverTime >= restartDelay;
 
@@ -245,6 +251,7 @@ public class DiveGame : MonoBehaviour
         identifyAction.AddBinding("<Keyboard>/i");
 
         if (GetComponent<DiveHUD>() == null) gameObject.AddComponent<DiveHUD>();
+        if (GetComponent<DiveAudio>() == null) gameObject.AddComponent<DiveAudio>();
     }
 
     void OnEnable()
@@ -349,8 +356,37 @@ public class DiveGame : MonoBehaviour
             }
         }
 
-        // Bonbonne vide : plus de nage tant qu'elle n'est pas changée
-        PlayerLock.SwimBlocked = TankEmpty && !IsChangingTank;
+        // Bonbonne vide : il reste quelques secondes pour la changer, sinon c'est l'asphyxie.
+        // Le compte à rebours s'arrête dès que le changement est lancé.
+        if (TankEmpty && !IsChangingTank)
+        {
+            Suffocation01 += dt / Mathf.Max(0.1f, suffocationTime);
+            if (Suffocation01 >= 1f)
+            {
+                Suffocation01 = 1f;
+                Lose("Tu as manqué d'air.\nChange ta bonbonne avant qu'elle soit vide.");
+            }
+        }
+        else
+        {
+            Suffocation01 = 0f;
+        }
+
+        PlayerLock.SwimBlocked = false; // on peut encore nager : c'est le manque d'air qui tue
+    }
+
+    /// <summary>Fin de partie : tout est figé, l'écran de fin s'affiche.</summary>
+    void Lose(string reason)
+    {
+        if (GameOver) return;
+
+        GameOver = true;
+        GameOverReason = reason;
+        gameOverTime = 0f;
+        WarningTimeLeft = 0f;
+        CancelScan();
+        IsChangingTank = false;
+        PlayerLock.Active = true; // plus aucune action possible
     }
 
     // ---------------------------------------------------------------- Identification
@@ -542,12 +578,8 @@ public class DiveGame : MonoBehaviour
         ProtectedKills++;
         if (ProtectedKills >= Mathf.Max(1, protectedKillsToLose))
         {
-            GameOver = true;
-            gameOverTime = 0f;
-            WarningTimeLeft = 0f;
-            CancelScan();
-            IsChangingTank = false;
-            PlayerLock.Active = true; // plus aucune action possible
+            Lose("Tu as pêché " + ProtectedKills + " poissons d'une espèce protégée.\n" +
+                 "Un bon pêcheur ne prend que ce que le récif peut donner.");
         }
         else
         {

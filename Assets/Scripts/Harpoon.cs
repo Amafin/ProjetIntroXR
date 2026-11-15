@@ -53,6 +53,46 @@ public class Harpoon : MonoBehaviour
     public float stickDepth = 0.2f;
     public bool stickInTerrain = true;
 
+    [Header("Tenue en javelot")]
+    [Tooltip("Tenu en main, le harpon pointe vers ce que tu regardes, quelle que soit l'orientation de la manette : " +
+             "tu peux le tenir au-dessus de l'épaule comme un javelot. Décoché : il suit le poignet.")]
+    public bool aimWithGaze = true;
+    [Tooltip("Distance du point visé le long du regard (m)")]
+    public float aimDistance = 18f;
+    [Tooltip("Vitesse à laquelle le harpon se tourne vers le point visé (plus haut = plus nerveux)")]
+    public float aimSmoothing = 14f;
+
+    [Header("Aide au lancer")]
+    [Tooltip("Vitesse minimale du harpon une fois lancé (m/s) : même un petit geste part vite et droit")]
+    public float minLaunchSpeed = 10f;
+    [Tooltip("Durée pendant laquelle le harpon vole parfaitement droit, sans retomber (secondes)")]
+    public float straightFlightTime = 1.6f;
+    [Tooltip("Si un poisson vivant se trouve à moins de cet angle (degrés) de la visée, le lancer est corrigé vers lui. 0 = aucune aide.")]
+    [Range(0f, 30f)] public float throwAssistAngle = 9f;
+    [Tooltip("Portée de cette aide (m)")]
+    public float throwAssistRange = 25f;
+
+    [Header("Étui à la ceinture")]
+    [Tooltip("Lâcher le harpon près de l'étui (hanche opposée à la sacoche) l'y range : on peut nager sans le tenir")]
+    public bool useHolster = true;
+    [Tooltip("Direction du harpon rangé, par rapport au corps (pointe vers l'arrière et le bas)")]
+    public Vector3 holsterDirection = new Vector3(0f, -0.35f, -1f);
+    [Tooltip("Glissement du harpon dans l'étui (m) : plus haut = la poignée dépasse moins vers l'avant")]
+    public float holsterSlide = 0.45f;
+
+    [Header("Reprise dans le dos")]
+    [Tooltip("Fermer une main VIDE dans son dos (derrière la tête ou l'épaule) ramène le harpon dans cette main, " +
+             "où qu'il soit. Il n'y a jamais qu'un seul harpon.")]
+    public bool recallFromBack = true;
+    [Tooltip("La main doit être au moins aussi loin derrière la tête (m)")]
+    public float backMinBehind = 0.05f;
+    [Tooltip("Largeur de la zone de chaque côté de la tête (m)")]
+    public float backHalfWidth = 0.5f;
+    [Tooltip("La zone descend jusque-là sous la tête (m)")]
+    public float backBelow = 0.6f;
+    [Tooltip("La zone monte jusque-là au-dessus de la tête (m)")]
+    public float backAbove = 0.4f;
+
     [Header("Lancer")]
     [Tooltip("Multiplie la vitesse du geste au moment du lâcher (un vrai lancer en VR est souvent mou)")]
     public float throwSpeedMultiplier = 1.5f;
@@ -103,11 +143,16 @@ public class Harpoon : MonoBehaviour
     // sinon, au lancement de la scène, il se plantait seul dans le sol en tombant.
     private bool armed;
     private float throwWindow;     // > 0 : on vient de le lâcher, la vitesse du lancer arrive
+    private float straightTimer;   // > 0 : vol parfaitement droit juste après le lancer
+    private bool aimSnap;          // vient d'être saisi : s'oriente d'un coup, sans lissage
+    private Transform head;
+    private XRBaseInputInteractor[] hands;   // tout ce qui peut saisir (manettes et mains suivies)
     private Vector3 startPos;
     private Quaternion startRot;
 
     // Planté dans le décor ou dans un poisson
     private bool stuck;
+    private bool holstered;        // rangé dans l'étui à la ceinture
     private Transform followTarget;
     private Vector3 localPos;
     private Quaternion localRot;
@@ -164,6 +209,8 @@ public class Harpoon : MonoBehaviour
         grab.throwAngularVelocityScale = 0f;  // pas de toupie : le harpon vole droit
         grab.movementType = XRBaseInteractable.MovementType.Instantaneous;
         grab.selectMode = InteractableSelectMode.Single;
+        // Tenue en javelot : la main donne la position, le regard donne la direction (voir AimHeld)
+        grab.trackRotation = !aimWithGaze;
 
         // Harpon en main avec un poisson embroché : l'autre main doit saisir le POISSON,
         // pas voler le harpon (les deux se chevauchent).
@@ -184,6 +231,86 @@ public class Harpoon : MonoBehaviour
         // Crée le sac à poissons (zone dans le dos + compteur) dès le départ
         if (FishBag.Instance == null)
             Debug.LogWarning("Harpoon: impossible de créer le sac à poissons (FishBag).", this);
+
+        hands = FindObjectsByType<XRBaseInputInteractor>(FindObjectsInactive.Include);
+    }
+
+    // ---------------------------------------------------------------- Reprise dans le dos
+
+    /// <summary>
+    /// Une main vide qui se ferme dans le dos du joueur reprend le harpon : il est téléporté
+    /// dans cette main, où qu'il soit (planté au loin, perdu au fond...).
+    /// </summary>
+    void CheckRecall()
+    {
+        if (!recallFromBack || hands == null || IsHeld || PlayerLock.Active) return;
+
+        // Un poisson est embroché dessus : pas de retour magique, il faut aller chercher sa prise
+        if (stuckFish != null) return;
+        if (head == null)
+        {
+            if (Camera.main == null) return;
+            head = Camera.main.transform;
+        }
+
+        for (int i = 0; i < hands.Length; i++)
+        {
+            XRBaseInputInteractor hand = hands[i];
+            if (hand == null || !hand.isActiveAndEnabled) continue;
+            if (hand.hasSelection) continue;                               // main déjà occupée
+            if (!hand.selectInput.ReadWasPerformedThisFrame()) continue;   // elle vient de se fermer
+            if (hand is XRRayInteractor) continue;                         // pas le rayon de téléportation
+
+            Vector3 handPos = hand.GetAttachTransform(grab).position;
+            if (!IsBehindPlayer(handPos)) continue;
+
+            Recall(hand, handPos);
+            return;
+        }
+    }
+
+    bool IsBehindPlayer(Vector3 point)
+    {
+        // Repère de la tête « à plat » : baisser ou lever les yeux ne déplace pas le dos
+        Vector3 forward = Vector3.ProjectOnPlane(head.forward, Vector3.up);
+        if (forward.sqrMagnitude < 0.01f)
+            forward = Vector3.ProjectOnPlane(head.forward.y > 0f ? -head.up : head.up, Vector3.up);
+        forward.Normalize();
+        Vector3 right = Vector3.Cross(Vector3.up, forward);
+
+        Vector3 d = point - head.position;
+        float z = Vector3.Dot(d, forward);
+        return z <= -backMinBehind && z >= -0.9f &&
+               Mathf.Abs(Vector3.Dot(d, right)) <= backHalfWidth &&
+               d.y >= -backBelow && d.y <= backAbove;
+    }
+
+    void Recall(XRBaseInputInteractor hand, Vector3 handPos)
+    {
+        // Le harpon quitte l'endroit où il était. S'il est planté dans un poisson, le poisson
+        // vient avec lui : c'est la façon simple de récupérer une prise lointaine.
+        Fish carriedFish = stuckFish;
+        holstered = false;
+        Unstick();
+        hovering = false;
+        throwWindow = 0f;
+        straightTimer = 0f;
+        hasLastTip = false;
+        rb.constraints = RigidbodyConstraints.None;
+        if (!rb.isKinematic)
+        {
+            rb.linearVelocity = Vector3.zero;
+            rb.angularVelocity = Vector3.zero;
+        }
+
+        transform.position = handPos;
+        rb.position = handPos;
+
+        // Mis directement dans la main : elle le tient tant qu'elle reste fermée
+        if (grab.interactionManager != null)
+            grab.interactionManager.SelectEnter((IXRSelectInteractor)hand, (IXRSelectInteractable)grab);
+
+        if (carriedFish != null) carriedFish.SetCarried(true); // suit le harpon (voir LateUpdate)
     }
 
     void OnDestroy()
@@ -199,6 +326,13 @@ public class Harpoon : MonoBehaviour
     {
         armed = true;
         throwWindow = 0f;
+        straightTimer = 0f;
+        aimSnap = true;
+        if (holstered)
+        {
+            holstered = false;
+            rb.constraints = RigidbodyConstraints.None;
+        }
         hasLastTip = false;
 
         if (hovering)
@@ -230,6 +364,19 @@ public class Harpoon : MonoBehaviour
     {
         if (grab.isSelected) return; // passé d'une main à l'autre
 
+        // Lâché près de l'étui : il s'y range au lieu d'être lancé ou de couler
+        if (useHolster && stuckFish == null && FishBag.Instance != null &&
+            FishBag.Instance.IsInHolsterZone(transform.position))
+        {
+            holstered = true;
+            armed = false;
+            throwWindow = 0f;
+            hasLastTip = false;
+            rb.constraints = RigidbodyConstraints.FreezeAll;
+            Pulse(args.interactorObject, 0.5f, 0.1f);
+            return;
+        }
+
         if (stuckFish != null)
         {
             // Lâché avec un poisson embroché : l'ensemble flotte, le harpon suit le poisson
@@ -246,7 +393,7 @@ public class Harpoon : MonoBehaviour
     {
         bool held = IsHeld;
 
-        if (hovering || stuck) return;
+        if (hovering || stuck || holstered) return;
 
         if (held)
         {
@@ -268,8 +415,60 @@ public class Harpoon : MonoBehaviour
         CheckLost();
     }
 
+    /// <summary>
+    /// Harpon en main : il pointe vers ce que le joueur regarde. La main ne donne que la position,
+    /// donc peu importe comment la manette est tournée : on peut l'armer au-dessus de l'épaule.
+    /// </summary>
+    void AimHeld()
+    {
+        if (!aimWithGaze || stuck || !IsHeld) return;
+        if (head == null)
+        {
+            if (Camera.main == null) return;
+            head = Camera.main.transform;
+        }
+
+        // Vers le point regardé, vu depuis la main : le harpon converge sur la cible
+        Vector3 target = head.position + head.forward * aimDistance;
+        Vector3 dir = target - transform.position;
+        if (dir.sqrMagnitude < 0.01f) return;
+
+        Quaternion wanted = Quaternion.LookRotation(dir.normalized, Vector3.up);
+        if (aimSnap)
+        {
+            transform.rotation = wanted;
+            aimSnap = false;
+        }
+        else
+        {
+            transform.rotation = Quaternion.Slerp(transform.rotation, wanted, 1f - Mathf.Exp(-aimSmoothing * Time.deltaTime));
+        }
+    }
+
+    /// <summary>Harpon rangé : il suit la hanche du joueur, pointe vers l'arrière.</summary>
+    bool FollowHolster()
+    {
+        if (!holstered) return false;
+
+        FishBag bag = FishBag.Instance;
+        if (bag == null) return false;
+
+        Vector3 dir = holsterDirection.sqrMagnitude > 0.001f ? holsterDirection.normalized : Vector3.back;
+        Quaternion rot = bag.BodyRotation * Quaternion.LookRotation(dir, Vector3.up);
+        transform.SetPositionAndRotation(bag.HolsterPosition + rot * Vector3.forward * holsterSlide, rot);
+        return true;
+    }
+
     void LateUpdate()
     {
+        if (FollowHolster()) return;
+
+        // Harpon en main (sans prise) : l'étui s'illumine quand la main s'en approche
+        if (useHolster && stuckFish == null && IsHeld && FishBag.Instance != null)
+            FishBag.Instance.IsInHolsterZone(transform.position);
+
+        AimHeld();
+
         // Le poisson embroché suit le harpon tenu en main
         if (!stuck)
         {
@@ -314,13 +513,69 @@ public class Harpoon : MonoBehaviour
 
         Vector3 dir = v / speed;
         Vector3 fwd = transform.forward;
-        // On ne corrige vers l'axe du harpon que s'il pointe à peu près dans le sens du geste
-        if (Vector3.Dot(dir, fwd) > 0.3f)
-            dir = Vector3.Slerp(dir, fwd, aimAlongHarpoon).normalized;
+        float launch = Mathf.Min(speed * throwSpeedMultiplier, maxThrowSpeed);
 
-        rb.linearVelocity = dir * Mathf.Min(speed * throwSpeedMultiplier, maxThrowSpeed);
+        if (aimWithGaze)
+        {
+            // Geste vers l'arrière ou sur le côté : ce n'est pas un lancer, le harpon est juste lâché
+            if (Vector3.Dot(dir, fwd) < 0.15f) return;
+
+            // Le geste donne la force, la visée donne la direction : le harpon part droit où il pointe
+            dir = fwd;
+            launch = Mathf.Clamp(launch, minLaunchSpeed, Mathf.Max(minLaunchSpeed, maxThrowSpeed));
+        }
+        else if (Vector3.Dot(dir, fwd) > 0.3f)
+        {
+            // On ne corrige vers l'axe du harpon que s'il pointe à peu près dans le sens du geste
+            dir = Vector3.Slerp(dir, fwd, aimAlongHarpoon).normalized;
+        }
+
+        dir = AssistTowardFish(dir, launch);
+
+        Quaternion rot = Quaternion.LookRotation(dir, Vector3.up);
+        rb.linearVelocity = dir * launch;
         rb.angularVelocity = Vector3.zero;
-        rb.MoveRotation(Quaternion.LookRotation(dir, transform.up));
+        rb.rotation = rot;
+        transform.rotation = rot;
+        straightTimer = straightFlightTime;
+        hasLastTip = false;
+
+        DiveAudio.Burst(1f); // gros mouvement dans l'eau : le son de mouvement se fait entendre
+    }
+
+    /// <summary>
+    /// Corrige légèrement la direction du lancer vers le poisson vivant le plus proche de la visée,
+    /// en visant là où il sera quand le harpon arrivera.
+    /// </summary>
+    Vector3 AssistTowardFish(Vector3 dir, float speed)
+    {
+        if (throwAssistAngle <= 0f || speed <= 0.1f) return dir;
+
+        Vector3 origin = tip.position;
+        float bestAngle = throwAssistAngle;
+        Vector3 bestDir = dir;
+
+        System.Collections.Generic.IReadOnlyList<Fish> all = Fish.All;
+        for (int i = 0; i < all.Count; i++)
+        {
+            Fish f = all[i];
+            if (f == null || f.IsDead) continue;
+
+            Vector3 pos = f.WorldBounds.center;
+            float dist = Vector3.Distance(origin, pos);
+            if (dist > throwAssistRange || dist < 0.3f) continue;
+
+            // Position du poisson à l'arrivée du harpon
+            Vector3 lead = pos + f.Velocity * (dist / speed);
+            Vector3 to = (lead - origin).normalized;
+            float angle = Vector3.Angle(dir, to);
+            if (angle < bestAngle)
+            {
+                bestAngle = angle;
+                bestDir = to;
+            }
+        }
+        return bestDir;
     }
 
     void ApplyFlight()
@@ -328,9 +583,16 @@ public class Harpoon : MonoBehaviour
         rb.linearDamping = flightDrag;
         rb.angularDamping = flightAngularDrag;
 
-        // Gravité réduite (poussée d'Archimède simplifiée)
+        // Juste après le lancer : vol parfaitement droit (gravité annulée). Ensuite, gravité
+        // réduite (poussée d'Archimède simplifiée) : le harpon finit par couler doucement.
+        float lift = 1f - gravityScale;
+        if (straightTimer > 0f)
+        {
+            straightTimer -= Time.fixedDeltaTime;
+            lift = 1f;
+        }
         if (rb.useGravity)
-            rb.AddForce(-Physics.gravity * (1f - gravityScale), ForceMode.Acceleration);
+            rb.AddForce(-Physics.gravity * lift, ForceMode.Acceleration);
 
         // S'oriente selon la trajectoire, comme une flèche
         Vector3 v = rb.linearVelocity;
@@ -561,6 +823,8 @@ public class Harpoon : MonoBehaviour
 
     void Update()
     {
+        CheckRecall();
+
         bool reset = false;
         bool throwIt = false;
 

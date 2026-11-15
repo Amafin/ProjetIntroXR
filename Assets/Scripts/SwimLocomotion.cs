@@ -3,12 +3,18 @@ using Unity.XR.CoreUtils;
 using UnityEngine;
 using UnityEngine.XR.Hands;
 using UnityEngine.XR.Interaction.Toolkit.Inputs;
+using UnityEngine.XR.Interaction.Toolkit.Interactors;
 #if ENABLE_INPUT_SYSTEM
 using UnityEngine.InputSystem;
 #endif
 
 /// <summary>
-/// Nage pour XR Origin : brasse avec les mains (manettes OU suivi des mains) + ZQSD au clavier.
+/// Nage pour XR Origin : joystick (principal), brasse avec les mains, ZQSD au clavier.
+///
+/// JOYSTICKS (le moyen principal, pour ne pas se fatiguer les bras) :
+///   Gauche : avancer / reculer dans la direction du regard (on monte ou descend en regardant
+///            vers le haut ou le bas), et se décaler sur les côtés.
+///   Droit  : haut / bas = monter / descendre ; gauche / droite = pivoter par crans.
 ///
 /// À placer sur la RACINE de l'XR Origin.
 ///
@@ -51,8 +57,25 @@ public class SwimLocomotion : MonoBehaviour
     [Tooltip("Force les flèches (haut/bas/gauche/droite) + PageUp (monter) / PageDown (descendre) au lieu de ZQSD")]
     public bool useArrowKeys = false;
 
+    [Header("Joysticks")]
+    public bool joystickEnabled = true;
+    [Tooltip("Accélération au joystick poussé à fond (m/s²)")]
+    public float joystickAcceleration = 5f;
+    [Tooltip("En dessous de cette inclinaison, le joystick est ignoré")]
+    [Range(0f, 0.9f)] public float joystickDeadZone = 0.15f;
+    [Tooltip("Angle d'un cran de rotation au joystick droit (0 = pas de rotation)")]
+    public float snapTurnAngle = 30f;
+
     [Header("Mains (brasse)")]
     public bool handsEnabled = true;
+    [Tooltip("Une main qui tient un objet (harpon, poisson) ne nage pas. Après l'avoir lâché, elle reste " +
+             "ignorée pendant ce délai (secondes), le temps que le geste de lancer se termine.")]
+    public float releaseCooldown = 0.7f;
+    [Tooltip("Multiplie la poussée de chaque mouvement de bras : plus haut = on va plus loin par mouvement")]
+    public float strokeBoost = 2.2f;
+    [Tooltip("Vitesse de main (m/s) nécessaire pour qu'un mouvement fasse RECULER. En dessous, la part de la " +
+             "poussée dirigée vers l'arrière est ignorée : ramener les bras ne fait plus reculer.")]
+    public float backwardStrokeSpeed = 1.3f;
     [Tooltip("Suivi des mains : axe LOCAL de la paume, perpendiculaire à la main (Y pour XR Hands). Le sens n'a pas d'importance.")]
     public Vector3 handPalmAxis = Vector3.up;
     [Tooltip("Manettes : axe LOCAL perpendiculaire à la paume (X = l'axe qui traverse la main quand on tient la manette). Le sens n'a pas d'importance.")]
@@ -73,6 +96,8 @@ public class SwimLocomotion : MonoBehaviour
     [Header("Eau")]
     [Tooltip("Frottement de l'eau : plus haut = on s'arrête plus vite")]
     public float waterDrag = 1.5f;
+    [Tooltip("Multiplie le frottement de l'eau : plus bas = on glisse plus longtemps après chaque mouvement")]
+    [Range(0.1f, 1.5f)] public float glide = 0.5f;
     public float maxSpeed = 3f;
 
     [Header("Surface")]
@@ -98,6 +123,9 @@ public class SwimLocomotion : MonoBehaviour
     {
         public bool isLeft;
         public Transform controller;
+        // Ce qui permet à cette main de saisir (manette + main suivie), pour savoir si elle tient un objet
+        public readonly List<IXRSelectInteractor> interactors = new List<IXRSelectInteractor>();
+        public float busyUntil;
         public HandSource source;
         public Vector3 lastPos;   // dans l'espace de tracking
         public Vector3 vel;       // dans l'espace de tracking
@@ -114,16 +142,42 @@ public class SwimLocomotion : MonoBehaviour
 
     /// <summary>Vitesse de nage actuelle du joueur (m/s). Lue par les poissons (fuite) et la bonbonne (consommation).</summary>
     public static float PlayerSpeed { get; private set; }
+    /// <summary>Effort de nage en cours, de 0 à 1 (poussée + vitesse). Sert au son de mouvement dans l'eau.</summary>
+    public static float Effort { get; private set; }
+
+    private InputAction moveStick, turnStick;
+    private bool turnReady = true;
+
+    void OnEnable()
+    {
+        if (moveStick == null)
+        {
+            moveStick = new InputAction("Nager (joystick gauche)", InputActionType.Value, "<XRController>{LeftHand}/thumbstick");
+            turnStick = new InputAction("Monter / pivoter (joystick droit)", InputActionType.Value, "<XRController>{RightHand}/thumbstick");
+        }
+        moveStick.Enable();
+        turnStick.Enable();
+    }
+
+    void OnDestroy()
+    {
+        if (moveStick != null) moveStick.Dispose();
+        if (turnStick != null) turnStick.Dispose();
+    }
 
     [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]
     static void ResetStatics()
     {
         PlayerSpeed = 0f;
+        Effort = 0f;
     }
 
     void OnDisable()
     {
         PlayerSpeed = 0f;
+        Effort = 0f;
+        if (moveStick != null) moveStick.Disable();
+        if (turnStick != null) turnStick.Disable();
     }
     private bool simulatorDetected;
     private float debugTimer;
@@ -145,6 +199,7 @@ public class SwimLocomotion : MonoBehaviour
 
         left.controller = leftController;
         right.controller = rightController;
+        CollectInteractors();
 
         if (autoDetectSimulator && SimulatorPresent())
         {
@@ -271,6 +326,7 @@ public class SwimLocomotion : MonoBehaviour
         {
             velocity = Vector3.zero;
             PlayerSpeed = 0f;
+            Effort = 0f;
             left.has = false;   // pas d'élan accumulé pendant l'arrêt
             right.has = false;
             return;
@@ -279,6 +335,7 @@ public class SwimLocomotion : MonoBehaviour
         // ---- Accélérations
         Vector3 accel = Vector3.zero;
         if (keyboardEnabled) accel += KeyboardAcceleration();
+        if (joystickEnabled) accel += JoystickAcceleration();
         if (handsEnabled)
         {
             Vector3 aL = HandAcceleration(left, dt);
@@ -306,12 +363,13 @@ public class SwimLocomotion : MonoBehaviour
 
         // ---- Intégration + frottement de l'eau
         velocity += accel * dt;
-        velocity *= Mathf.Exp(-waterDrag * dt);
+        velocity *= Mathf.Exp(-waterDrag * glide * dt);
         velocity = Vector3.ClampMagnitude(velocity, maxSpeed);
 
         // ---- Déplacement
         Translate(velocity * dt);
         PlayerSpeed = velocity.magnitude;
+        Effort = Mathf.Clamp01(Mathf.Max(accel.magnitude / 8f, maxSpeed > 0f ? PlayerSpeed / maxSpeed : 0f));
 
         // ---- Surface
         if (limitToSurface)
@@ -328,6 +386,49 @@ public class SwimLocomotion : MonoBehaviour
                 if (velocity.y > 0f) velocity.y = 0f;
             }
         }
+    }
+
+    // ---------------------------------------------------------------- Joysticks
+
+    Vector3 JoystickAcceleration()
+    {
+        Vector2 move = DeadZone(moveStick.ReadValue<Vector2>());
+        Vector2 aux = DeadZone(turnStick.ReadValue<Vector2>());
+
+        // Le joystick d'une main qui tient un objet est ignoré : en armant ou en lançant le harpon,
+        // le pouce le pousse sans le vouloir (on plongeait en ramenant le bras).
+        if (HandIsBusy(left)) move = Vector2.zero;
+        if (HandIsBusy(right)) aux = Vector2.zero;
+
+        // Joystick droit, gauche / droite : pivote d'un cran, puis attend qu'on relâche
+        if (snapTurnAngle > 0f)
+        {
+            if (turnReady && Mathf.Abs(aux.x) > 0.7f && Mathf.Abs(aux.x) > Mathf.Abs(aux.y))
+            {
+                float angle = Mathf.Sign(aux.x) * snapTurnAngle;
+                transform.RotateAround(head.position, Vector3.up, angle); // autour de la tête : pas de saut de position
+                velocity = Quaternion.Euler(0f, angle, 0f) * velocity;
+                turnReady = false;
+            }
+            else if (Mathf.Abs(aux.x) < 0.3f)
+            {
+                turnReady = true;
+            }
+        }
+
+        // Joystick gauche : dans la direction du regard. Joystick droit, haut / bas : monter / descendre.
+        float vertical = Mathf.Abs(aux.y) > Mathf.Abs(aux.x) ? aux.y : 0f;
+        Vector3 dir = head.forward * move.y + head.right * move.x + Vector3.up * vertical;
+        if (dir.sqrMagnitude > 1f) dir.Normalize();
+        return dir * joystickAcceleration;
+    }
+
+    Vector2 DeadZone(Vector2 v)
+    {
+        float m = v.magnitude;
+        if (m <= joystickDeadZone) return Vector2.zero;
+        // Repart de zéro au bord de la zone morte : dosage fin pour approcher les poissons lentement
+        return v / m * Mathf.InverseLerp(joystickDeadZone, 1f, Mathf.Min(m, 1f));
     }
 
     // ---------------------------------------------------------------- Clavier
@@ -397,8 +498,48 @@ public class SwimLocomotion : MonoBehaviour
 
     // ---------------------------------------------------------------- Brasse
 
+    /// <summary>Relève les interacteurs de chaque main (sous la manette et sous la main suivie).</summary>
+    void CollectInteractors()
+    {
+        XRInputModalityManager modality = GetComponentInChildren<XRInputModalityManager>(true);
+        AddInteractors(left, leftController, modality != null && modality.leftHand != null ? modality.leftHand.transform : null);
+        AddInteractors(right, rightController, modality != null && modality.rightHand != null ? modality.rightHand.transform : null);
+    }
+
+    static void AddInteractors(HandState h, Transform controller, Transform trackedHand)
+    {
+        h.interactors.Clear();
+        if (controller != null) h.interactors.AddRange(controller.GetComponentsInChildren<IXRSelectInteractor>(true));
+        if (trackedHand != null) h.interactors.AddRange(trackedHand.GetComponentsInChildren<IXRSelectInteractor>(true));
+    }
+
+    /// <summary>
+    /// Vrai si la main tient un objet (harpon, poisson), ou vient de le lâcher : elle ne nage pas.
+    /// Sans ça, armer le harpon derrière l'épaule ou le lancer propulsait le joueur.
+    /// </summary>
+    bool HandIsBusy(HandState h)
+    {
+        for (int i = 0; i < h.interactors.Count; i++)
+        {
+            IXRSelectInteractor it = h.interactors[i];
+            if (it != null && it.hasSelection)
+            {
+                h.busyUntil = Time.time + releaseCooldown; // le geste se termine après le lâcher
+                return true;
+            }
+        }
+        return Time.time < h.busyUntil;
+    }
+
     Vector3 HandAcceleration(HandState h, float dt)
     {
+        if (HandIsBusy(h))
+        {
+            h.has = false;
+            h.vel = Vector3.zero;
+            return Vector3.zero;
+        }
+
         // Main non suivie (tracking perdu, manette éteinte) : on réinitialise
         if (!TryGetPalm(h, out Vector3 pos, out Vector3 n, out HandSource source))
         {
@@ -440,7 +581,18 @@ public class SwimLocomotion : MonoBehaviour
         if (speed <= minStrokeSpeed) return Vector3.zero;
 
         // La poussée est opposée au mouvement de la main
-        return -(push / speed) * (speed - minStrokeSpeed) * strokePower;
+        Vector3 thrust = -(push / speed) * (speed - minStrokeSpeed) * strokePower * strokeBoost;
+
+        // Pas de recul parasite : la part de la poussée dirigée vers l'arrière (par rapport au regard)
+        // n'est gardée que pour un geste franc. Ramener doucement les bras vers l'avant ne fait plus reculer.
+        if (speed < backwardStrokeSpeed)
+        {
+            Vector3 forward = head.forward;
+            float along = Vector3.Dot(thrust, forward);
+            if (along < 0f) thrust -= forward * along;
+        }
+
+        return thrust;
     }
 
     // ---------------------------------------------------------------- Déplacement + collisions

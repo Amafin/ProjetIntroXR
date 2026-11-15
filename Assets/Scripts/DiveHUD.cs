@@ -8,7 +8,7 @@ using UnityEngine.UI;
 ///   - en bas à gauche  : la bonbonne d'air, « AIR x % » et, au-dessus, l'objectif en cours ;
 ///   - en haut à droite : la fiche du poisson identifié (image, nom, statut, description) ;
 ///   - en bas à droite  : le petit cercle qui tourne, uniquement pendant le changement de bonbonne ;
-///   - au centre        : le cercle qui se remplit pendant le scan d'un poisson.
+///   - dans le monde     : l'anneau de scan, posé autour du poisson (pas sur l'interface).
 ///
 /// Toute l'interface est construite par le code au lancement (formes dessinées dans des
 /// textures) : aucun prefab ni image à importer. Elle lit l'état de DiveGame.
@@ -18,14 +18,23 @@ public class DiveHUD : MonoBehaviour
     [Header("Placement devant le regard")]
     [Tooltip("Distance de l'interface devant les yeux (m)")]
     public float distance = 0.9f;
-    [Tooltip("Taille de l'interface : mètres par pixel d'interface (1000 x 640 pixels)")]
+    [Tooltip("Taille de l'interface : mètres par pixel d'interface")]
     public float scale = 0.0007f;
+    [Tooltip("Étendue de l'interface en pixels. Les éléments sont accrochés aux coins : agrandir cette zone les " +
+             "ÉCARTE vers les bords du champ de vision sans changer leur taille.")]
+    public Vector2 canvasSize = new Vector2(1500f, 900f);
     [Tooltip("Décalage vertical (m) : négatif = plus bas dans le champ de vision")]
     public float verticalOffset = -0.02f;
 
     [Header("Explication du scan (affichée une seule fois)")]
     [Tooltip("Texte montré la première fois qu'on fixe un poisson")]
     public string scanTutorial = "Appuie sur A pour scanner ce poisson";
+
+    [Header("Anneau de scan (dans le monde, autour du poisson)")]
+    [Tooltip("Diamètre de l'anneau par rapport à la taille du poisson")]
+    public float scanRingMargin = 1.35f;
+    [Tooltip("Diamètre minimal de l'anneau (m), pour qu'il reste visible sur un petit poisson lointain")]
+    public float scanRingMinSize = 0.6f;
 
     [Header("Couleurs")]
     [Tooltip("Fond de la fiche : le sable du fond marin")]
@@ -68,10 +77,13 @@ public class DiveHUD : MonoBehaviour
 
     // Espèces protégées : avertissement, puis partie perdue
     private CanvasGroup warningGroup, gameOverGroup;
+    private Image airVeil;
     private TextMeshProUGUI warningTitle, warningText, gameOverText, restartText;
 
     // Scan d'un poisson
     private Image scanTrack, scanFill;
+    private RectTransform scanRing;
+    const float RingPixels = 200f;
     private TextMeshProUGUI tutorialText;
     private CanvasGroup tutorialGroup;
 
@@ -109,7 +121,7 @@ public class DiveHUD : MonoBehaviour
         canvas.worldCamera = Camera.main;
 
         canvasRect = go.GetComponent<RectTransform>();
-        canvasRect.sizeDelta = new Vector2(1000f, 640f);
+        canvasRect.sizeDelta = canvasSize;
         canvasRect.localPosition = new Vector3(0f, verticalOffset, distance);
         canvasRect.localRotation = Quaternion.identity;
         canvasRect.localScale = Vector3.one * scale;
@@ -189,15 +201,22 @@ public class DiveHUD : MonoBehaviour
         tankHint.enabled = false;
 
         // ---- Scan (centre du regard) : cercle transparent qui se remplit
-        scanTrack = NewImage("Scan - anneau", canvasRect, HudSprites.ScanRing, new Color(1f, 1f, 1f, 0.26f), center, Vector2.zero, new Vector2(150f, 150f));
-        scanFill = NewImage("Scan - remplissage", canvasRect, HudSprites.ScanRing, scanColor, center, Vector2.zero, new Vector2(150f, 150f));
+        // L'anneau n'est PAS sur l'interface : il est dans le monde, autour du poisson, à sa distance.
+        // (Collé au regard, il bougeait avec la tête et donnait la nausée.)
+        GameObject ringObject = new GameObject("Anneau de scan", typeof(RectTransform), typeof(Canvas));
+        ringObject.transform.SetParent(transform, false);
+        ringObject.layer = head.gameObject.layer;
+        ringObject.GetComponent<Canvas>().renderMode = RenderMode.WorldSpace;
+        scanRing = ringObject.GetComponent<RectTransform>();
+        scanRing.sizeDelta = new Vector2(RingPixels, RingPixels);
+        scanTrack = NewImage("Scan - anneau", scanRing, HudSprites.ScanRing, new Color(1f, 1f, 1f, 0.26f), center, Vector2.zero, new Vector2(RingPixels, RingPixels));
+        scanFill = NewImage("Scan - remplissage", scanRing, HudSprites.ScanRing, scanColor, center, Vector2.zero, new Vector2(RingPixels, RingPixels));
+        ringObject.SetActive(false);
         scanFill.type = Image.Type.Filled;
         scanFill.fillMethod = Image.FillMethod.Radial360;
         scanFill.fillOrigin = (int)Image.Origin360.Top;
         scanFill.fillClockwise = true;
         scanFill.fillAmount = 0f;
-        scanTrack.enabled = false;
-        scanFill.enabled = false;
 
         // ---- Explication du scan, sous le centre du regard (une seule fois)
         tutorialText = NewText("Explication scan", canvasRect, scanTutorial, 24f, hudTextColor, center, new Vector2(0f, -72f), new Vector2(620f, 40f), TextAlignmentOptions.Center);
@@ -216,8 +235,13 @@ public class DiveHUD : MonoBehaviour
         warningTitle.fontStyle = FontStyles.Bold;
         warningText = NewText("Texte", warning, "", 20f, cardColor, new Vector2(0.5f, 0f), new Vector2(0f, 14f), new Vector2(warnW - 40f, 30f), TextAlignmentOptions.Bottom);
 
+        // ---- Manque d'air : voile rouge sur tout le champ de vision
+        airVeil = NewImage("Voile rouge (manque d'air)", canvasRect, null, new Color(0.75f, 0.04f, 0.04f, 0f), center, Vector2.zero, new Vector2(6000f, 6000f));
+        airVeil.transform.SetAsFirstSibling(); // derrière la bonbonne et les textes, qui restent lisibles
+        airVeil.enabled = false;
+
         // ---- Partie perdue : voile sombre sur tout le champ de vision + message
-        RectTransform over = NewRect("Partie perdue", canvasRect, center, Vector2.zero, new Vector2(1000f, 640f));
+        RectTransform over = NewRect("Partie perdue", canvasRect, center, Vector2.zero, canvasSize);
         gameOverGroup = over.gameObject.AddComponent<CanvasGroup>();
         gameOverGroup.alpha = 0f;
         Color veil = lineColor;
@@ -255,6 +279,21 @@ public class DiveHUD : MonoBehaviour
         UpdateTankChange();
         UpdateScan();
         UpdateProtected();
+        UpdateAirVeil();
+    }
+
+    void UpdateAirVeil()
+    {
+        // Rouge dès que la bonbonne est vide, de plus en plus dense et rapide à l'approche de l'asphyxie
+        float s = game.GameOver ? 0f : game.Suffocation01;
+        bool on = s > 0f;
+        if (airVeil.enabled != on) airVeil.enabled = on;
+        if (!on) return;
+
+        float pulse = 0.5f + 0.5f * Mathf.Sin(Time.unscaledTime * Mathf.Lerp(5f, 14f, s));
+        Color c = airVeil.color;
+        c.a = Mathf.Lerp(0.22f, 0.6f, s) + 0.12f * pulse;
+        airVeil.color = c;
     }
 
     void UpdateProtected()
@@ -274,27 +313,31 @@ public class DiveHUD : MonoBehaviour
         gameOverGroup.alpha = Mathf.MoveTowards(gameOverGroup.alpha, game.GameOver ? 1f : 0f, Time.unscaledDeltaTime * 2.5f);
         if (game.GameOver)
         {
-            gameOverText.text = "Tu as pêché " + game.ProtectedKills + " poissons d'une espèce protégée.\n" +
-                                "Un bon pêcheur ne prend que ce que le récif peut donner.";
+            gameOverText.text = game.GameOverReason;
             restartText.text = game.CanRestart ? "Appuie sur A pour recommencer" : "";
         }
     }
 
     void UpdateScan()
     {
-        bool scanning = game.IsScanning;
-        scanTrack.enabled = scanning;
-        scanFill.enabled = scanning;
+        bool scanning = game.IsScanning && game.ScanTarget != null;
+        if (scanRing.gameObject.activeSelf != scanning) scanRing.gameObject.SetActive(scanning);
         if (scanning)
         {
             scanFill.fillAmount = game.ScanProgress;
 
-            // L'anneau entoure le poisson scanné et le suit ; il tourne lentement sur lui-même
-            Vector2 pos = FishOnCanvas(game.ScanTarget);
-            scanTrack.rectTransform.anchoredPosition = pos;
-            scanFill.rectTransform.anchoredPosition = pos;
-            float size = Mathf.Lerp(190f, 150f, game.ScanProgress); // se resserre en se remplissant
-            scanTrack.rectTransform.sizeDelta = scanFill.rectTransform.sizeDelta = new Vector2(size, size);
+            // Posé sur le poisson, à sa distance, toujours face au joueur
+            Bounds b = game.ScanTarget.WorldBounds;
+            Vector3 toFish = b.center - head.position;
+            scanRing.position = b.center;
+            if (toFish.sqrMagnitude > 0.0001f)
+                scanRing.rotation = Quaternion.LookRotation(toFish, Vector3.up);
+
+            // Un peu plus grand que le poisson ; se resserre en se remplissant
+            float diameter = Mathf.Max(scanRingMinSize, b.extents.magnitude * 2f * scanRingMargin);
+            diameter *= Mathf.Lerp(1.25f, 1f, game.ScanProgress);
+            scanRing.localScale = Vector3.one * (diameter / RingPixels);
+
             scanTrack.rectTransform.localRotation = Quaternion.Euler(0f, 0f, Time.unscaledTime * 25f);
         }
 
@@ -362,22 +405,6 @@ public class DiveHUD : MonoBehaviour
         spinnerImage.enabled = changing;
         tankHint.enabled = changing;
         if (changing) spinner.localRotation = Quaternion.Euler(0f, 0f, -Time.unscaledTime * 300f);
-    }
-
-    /// <summary>Position d'un poisson sur l'interface (pixels depuis le centre), bornée à l'écran.</summary>
-    Vector2 FishOnCanvas(Fish fish)
-    {
-        if (fish == null || head == null) return Vector2.zero;
-
-        Vector3 local = head.InverseTransformPoint(fish.WorldBounds.center);
-        if (local.z < 0.05f) return Vector2.zero;
-
-        // Projection sur le plan de l'interface, placé à 'distance' devant les yeux
-        float k = distance / local.z / Mathf.Max(1e-6f, scale);
-        Vector2 pos = new Vector2(local.x * k, (local.y * distance / local.z - verticalOffset) / Mathf.Max(1e-6f, scale));
-        pos.x = Mathf.Clamp(pos.x, -400f, 400f);
-        pos.y = Mathf.Clamp(pos.y, -230f, 230f);
-        return pos;
     }
 
     // ---------------------------------------------------------------- Image du poisson

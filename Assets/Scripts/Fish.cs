@@ -71,6 +71,11 @@ public class Fish : MonoBehaviour
     [Tooltip("Désactiver le collider à la mort ? (sinon il reste harponnable)")]
     public bool keepColliderWhenDead = true;
 
+    [Header("Ramassage")]
+    [Tooltip("Rayon (m) dans lequel la main peut saisir le poisson MORT. Plus grand que le poisson, " +
+             "pour ne pas avoir à viser précisément son corps.")]
+    public float grabRadius = 0.38f;
+
     [Header("Obstacles (terrain, rochers...)")]
     [Tooltip("Layers considérés comme obstacles. Exclure le layer de l'eau si elle a un collider !")]
     public LayerMask obstacleMask = ~0;
@@ -158,6 +163,10 @@ public class Fish : MonoBehaviour
     public FishSpecies Species { get; private set; } = FishSpecies.Default;
 
     public bool IsDead => state == State.Dead;
+    /// <summary>Déplacement du poisson (m/s), pour viser là où il sera.</summary>
+    public Vector3 Velocity => rb != null && !rb.isKinematic ? rb.linearVelocity : Vector3.zero;
+    /// <summary>Vitesse de nage du poisson (m/s).</summary>
+    public float Speed => rb != null && !rb.isKinematic ? rb.linearVelocity.magnitude : 0f;
     /// <summary>Tenu dans une main.</summary>
     public bool IsHeld => grab != null && grab.isSelected;
     /// <summary>Tenu en main ou embroché sur le harpon : le spawner ne doit pas le supprimer.</summary>
@@ -446,6 +455,18 @@ public class Fish : MonoBehaviour
     void MakeGrabbable()
     {
         if (grab != null) return;
+
+        // Zone de saisie élargie autour du poisson mort (ajoutée AVANT le Grab Interactable, qui
+        // relève les colliders à sa création). Le poisson mort est immobile : aucun effet physique.
+        if (grabRadius > 0f)
+        {
+            Vector3 bodyCenter = transform.InverseTransformPoint(WorldBounds.center); // relevé avant d'ajouter la zone
+            SphereCollider zone = gameObject.AddComponent<SphereCollider>();
+            Vector3 scale = transform.lossyScale;
+            float s = Mathf.Max(0.0001f, Mathf.Max(Mathf.Abs(scale.x), Mathf.Abs(scale.y), Mathf.Abs(scale.z)));
+            zone.radius = grabRadius / s;
+            zone.center = bodyCenter;
+        }
 
         grab = GetComponent<XRGrabInteractable>();
         if (grab == null) grab = gameObject.AddComponent<XRGrabInteractable>();

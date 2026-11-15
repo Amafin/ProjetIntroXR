@@ -45,6 +45,13 @@ public class FishBag : MonoBehaviour
     [Tooltip("Distance (m) à partir de laquelle la sacoche s'illumine")]
     public float highlightRadius = 0.7f;
 
+    [Header("Étui du harpon (sur l'autre hanche)")]
+    [Tooltip("Affiche l'étui où poser le harpon")]
+    public bool showHolster = true;
+    [Tooltip("Distance main-étui (m) à laquelle le harpon lâché s'y range")]
+    public float holsterRadius = 0.32f;
+    public Color holsterColor = new Color(0.20f, 0.24f, 0.28f);
+
     [Header("Apparence")]
     [Tooltip("Affiche la sacoche (sinon la zone existe mais reste invisible)")]
     public bool showPouch = true;
@@ -58,8 +65,9 @@ public class FishBag : MonoBehaviour
     public int Count { get; private set; }
 
     private static FishBag instance;
-    private Transform pouch;
-    private Material pouchMat, flapMat;
+    private Transform pouch, holster;
+    private Material pouchMat, flapMat, holsterMat;
+    private float holsterProximity, holsterHighlight;
     private float bodyYaw;
     private bool hasYaw;
     private float proximity;      // 0 = loin, 1 = main sur la sacoche (pour cette image)
@@ -103,6 +111,7 @@ public class FishBag : MonoBehaviour
         if (instance == this) instance = null;
         if (pouchMat != null) Destroy(pouchMat);
         if (flapMat != null) Destroy(flapMat);
+        if (holsterMat != null) Destroy(holsterMat);
     }
 
     // ---------------------------------------------------------------- Rangement
@@ -121,6 +130,34 @@ public class FishBag : MonoBehaviour
         float d = Vector3.Distance(handPosition, PouchPosition);
         proximity = Mathf.Max(proximity, Mathf.InverseLerp(highlightRadius, dropRadius, d));
         return d <= dropRadius;
+    }
+
+    // ---------------------------------------------------------------- Étui du harpon
+
+    /// <summary>Orientation du corps du joueur (suit la tête avec retard).</summary>
+    public Quaternion BodyRotation => Quaternion.Euler(0f, bodyYaw, 0f);
+
+    /// <summary>Position de l'étui du harpon, sur la hanche opposée à la sacoche.</summary>
+    public Vector3 HolsterPosition => HipPoint(side == Side.Left ? Side.Right : Side.Left);
+
+    /// <summary>
+    /// À appeler à chaque image pour la main qui tient le harpon : illumine l'étui à l'approche,
+    /// et renvoie vrai quand la main est dessus (le harpon lâché ici s'y range).
+    /// </summary>
+    public bool IsInHolsterZone(Vector3 handPosition)
+    {
+        if (head == null) return false;
+
+        float d = Vector3.Distance(handPosition, HolsterPosition);
+        holsterProximity = Mathf.Max(holsterProximity, Mathf.InverseLerp(holsterRadius * 2.2f, holsterRadius, d));
+        return d <= holsterRadius;
+    }
+
+    Vector3 HipPoint(Side hip)
+    {
+        if (head == null) return transform.position;
+        float lateral = hip == Side.Left ? -sideOffset : sideOffset;
+        return head.position + Vector3.down * hipDrop + BodyRotation * new Vector3(lateral, 0f, forwardOffset);
     }
 
     /// <summary>Range un poisson dans la sacoche : +1.</summary>
@@ -145,6 +182,7 @@ public class FishBag : MonoBehaviour
         Follow(false);
         Animate();
         proximity = 0f; // recalculé par les mains à la prochaine image
+        holsterProximity = 0f;
     }
 
     Vector3 ComputePosition(out Quaternion rotation)
@@ -177,6 +215,12 @@ public class FishBag : MonoBehaviour
             }
         }
 
+        if (holster != null)
+        {
+            float away = side == Side.Left ? 90f : -90f;
+            holster.SetPositionAndRotation(HolsterPosition, BodyRotation * Quaternion.Euler(0f, away, 0f));
+        }
+
         if (pouch == null) return;
         Vector3 pos = ComputePosition(out Quaternion rot);
         // La sacoche est tournée vers l'extérieur de la hanche
@@ -194,6 +238,14 @@ public class FishBag : MonoBehaviour
         float pulse = highlight > 0.01f ? 0.5f + 0.5f * Mathf.Sin(Time.time * 8f) : 0f;
         pouch.localScale = Vector3.one * (1f + 0.18f * highlight + 0.06f * pulse * highlight + 0.35f * punch);
 
+        if (holster != null)
+        {
+            holsterHighlight = Mathf.MoveTowards(holsterHighlight, holsterProximity, Time.deltaTime * 6f);
+            float hp = holsterHighlight > 0.01f ? 0.5f + 0.5f * Mathf.Sin(Time.time * 8f) : 0f;
+            holster.localScale = Vector3.one * (1f + 0.2f * holsterHighlight + 0.06f * hp * holsterHighlight);
+            SetColor(holsterMat, Color.Lerp(holsterColor, highlightColor, Mathf.Clamp01(holsterHighlight * (0.6f + 0.4f * hp))));
+        }
+
         float glow = Mathf.Clamp01(highlight * (0.6f + 0.4f * pulse) + punch);
         SetColor(pouchMat, Color.Lerp(pouchColor, highlightColor, glow));
         SetColor(flapMat, Color.Lerp(flapColor, highlightColor, glow * 0.7f));
@@ -208,8 +260,24 @@ public class FishBag : MonoBehaviour
 
     // ---------------------------------------------------------------- Modèle de la sacoche
 
+    void BuildHolster()
+    {
+        if (holster != null || !showHolster) return;
+
+        holster = new GameObject("Étui du harpon").transform;
+        holster.SetParent(transform, false);
+        holsterMat = NewMaterial(holsterColor);
+
+        // Un fourreau court, ouvert vers l'avant, tenu par une sangle
+        var parts = new List<Vector3[]>();
+        AddTapered(parts, new Vector3(0f, 0f, 0f), 0.085f, 0.065f, 0.17f, 0.085f, 0.065f);
+        AddTapered(parts, new Vector3(0f, 0.15f, -0.02f), 0.045f, 0.045f, 0.14f, 0.02f, 0.02f);
+        AddPartTo(holster, "Fourreau", parts, holsterMat);
+    }
+
     void BuildPouch()
     {
+        BuildHolster();
         if (pouch != null || !showPouch) return;
 
         pouch = new GameObject("Sacoche").transform;
@@ -258,6 +326,11 @@ public class FishBag : MonoBehaviour
     /// <summary>Crée un maillage à faces plates à partir de quadrilatères (le 5e point est l'intérieur de la pièce).</summary>
     void AddPart(string name, List<Vector3[]> quads, Material material)
     {
+        AddPartTo(pouch, name, quads, material);
+    }
+
+    void AddPartTo(Transform parent, string name, List<Vector3[]> quads, Material material)
+    {
         var vertices = new List<Vector3>();
         var normals = new List<Vector3>();
         var triangles = new List<int>();
@@ -293,7 +366,7 @@ public class FishBag : MonoBehaviour
         mesh.RecalculateBounds();
 
         GameObject go = new GameObject(name);
-        go.transform.SetParent(pouch, false);
+        go.transform.SetParent(parent, false);
         go.AddComponent<MeshFilter>().sharedMesh = mesh;
         MeshRenderer r = go.AddComponent<MeshRenderer>();
         r.sharedMaterial = material;
