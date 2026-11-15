@@ -47,12 +47,18 @@ public class FishSpawner : MonoBehaviour
     [Tooltip("1 = tailles réparties uniformément. Plus haut = beaucoup de petits poissons et de rares gros.")]
     public float bigFishRarity = 1.5f;
 
+    [Header("Espèces")]
+    [Tooltip("Part des poissons qui sont d'une espèce protégée (0 = aucun)")]
+    [Range(0f, 1f)] public float protectedRatio = 0.3f;
+
     [Header("Règles d'apparition")]
     [Tooltip("Pas de spawn plus près que ça du joueur (évite l'effet pop-in)")]
     public float minDistanceFromPlayer = 15f;
     [Tooltip("Écart minimum entre deux poissons au spawn (répartit les maisons)")]
     public float minDistanceBetweenFish = 8f;
     public int maxPlacementAttempts = 20;
+    [Tooltip("Espace libre exigé autour du point d'apparition (m) : évite de naître dans un corail")]
+    public float spawnClearance = 1.5f;
 
     [Header("Nettoyage")]
     [Tooltip("Supprime un poisson mort après X secondes (0 = jamais)")]
@@ -126,6 +132,15 @@ public class FishSpawner : MonoBehaviour
         fish.useWaterSurface = true;
         fish.waterSurfaceY = transform.position.y;
 
+        // Espèce : surtout l'espèce pêchable, avec une part d'espèces protégées
+        FishSpecies species = FishSpecies.Default;
+        if (Random.value < protectedRatio)
+        {
+            FishSpecies rare = FishSpecies.RandomProtected();
+            if (rare != null) species = rare;
+        }
+        fish.SetSpecies(species);
+
         fishes.Add(fish);
         return true;
     }
@@ -163,6 +178,10 @@ public class FishSpawner : MonoBehaviour
                 continue;
 
             if (TooCloseToAnotherFish(candidate)) continue;
+
+            // Pas dans un corail ou un rocher (le rayon vers le fond ne voit que ce qui est dessous)
+            if (Physics.CheckSphere(candidate, spawnClearance, seabedMask, QueryTriggerInteraction.Ignore))
+                continue;
 
             pos = candidate;
             return true;
@@ -208,7 +227,8 @@ public class FishSpawner : MonoBehaviour
 
             if (!f.IsDead) continue;
 
-            if (!deathTimes.ContainsKey(f))
+            // Tenu en main ou embroché sur le harpon : on ne le supprime pas sous le nez du joueur
+            if (!deathTimes.ContainsKey(f) || f.IsBusy)
                 deathTimes[f] = Time.time;
 
             if (deadFishLifetime > 0f && Time.time - deathTimes[f] >= deadFishLifetime)

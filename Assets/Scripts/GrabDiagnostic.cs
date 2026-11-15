@@ -164,13 +164,20 @@ public class GrabDiagnostic : MonoBehaviour
 
     // ---------------------------------------------------------------- Utilitaires
 
-    static IEnumerable<MonoBehaviour> AllBehaviours()
+    // Liste relevée une seule fois : parcourir toute la scène chaque seconde faisait saccader le casque
+    private MonoBehaviour[] allBehaviours;
+
+    IEnumerable<MonoBehaviour> AllBehaviours()
     {
+        if (allBehaviours == null)
+        {
 #if UNITY_2022_2_OR_NEWER
-        return FindObjectsByType<MonoBehaviour>(FindObjectsInactive.Include, FindObjectsSortMode.None);
+            allBehaviours = FindObjectsByType<MonoBehaviour>(FindObjectsInactive.Include, FindObjectsSortMode.None);
 #else
-        return FindObjectsOfType<MonoBehaviour>(true);
+            allBehaviours = FindObjectsOfType<MonoBehaviour>(true);
 #endif
+        }
+        return allBehaviours;
     }
 
     static int ReadLayers(Component c)
